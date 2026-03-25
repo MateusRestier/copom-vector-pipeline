@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "copom-vector-pipeline"
+version = "0.1.0"
+description = "Data ingestion pipeline for COPOM documents into PostgreSQL+pgvector"
+requires-python = ">=3.11"
+readme = "README.md"
+
+dependencies = [
+    "google-generativeai>=0.7.0",
+    "psycopg2-binary>=2.9",
+    "pgvector>=0.3.0",
+    "langchain-text-splitters>=0.2.0",
+    "tiktoken>=0.7.0",
+    "pdfplumber>=0.11.0",
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+    "tqdm>=4.65.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
+
+[project.scripts]
+copom-pipeline = "copom_pipeline.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

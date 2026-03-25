@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: copom_pgvector
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: copom
+      POSTGRES_PASSWORD: copom
+      POSTGRES_DB: copom_rag
+    volumes:
+      - pgvector_data:/var/lib/postgresql/data
+      # Schema is applied automatically on first container start.
+      - ./scripts/create_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    restart: unless-stopped
+
+volumes:
+  pgvector_data:
