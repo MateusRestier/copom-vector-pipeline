@@ -116,7 +116,13 @@ class CopomPipeline:
                 date_to=date_to,
                 dry_run=self._dry_run,
             ):
-                src_hash = hash_bytes(raw_doc.raw_bytes) if raw_doc.raw_bytes else ""
+                # Dedup key: hash of PDF bytes for PDF docs, hash of text for HTML docs
+                if raw_doc.raw_bytes:
+                    src_hash = hash_bytes(raw_doc.raw_bytes)
+                elif raw_doc.raw_text:
+                    src_hash = hash_bytes(raw_doc.raw_text.encode("utf-8"))
+                else:
+                    src_hash = ""
 
                 if src_hash and src_hash in known_hashes:
                     logger.debug("Skipping already-ingested: %s", raw_doc.title)
@@ -160,9 +166,20 @@ class CopomPipeline:
 
     def _process_document(self, raw_doc, src_hash: str) -> int:
         """Parse, chunk, embed and store a single document. Returns chunk count."""
-        parsed = self._parser.parse(raw_doc.raw_bytes)
-        if parsed is None:
-            logger.warning("Could not parse PDF: %s", raw_doc.title)
+        # Resolve plain text: PDF docs go through PdfParser, HTML docs are used directly.
+        if raw_doc.has_pdf:
+            parsed = self._parser.parse(raw_doc.raw_bytes)
+            if parsed is None:
+                logger.warning("Could not parse PDF: %s", raw_doc.title)
+                return 0
+            raw_text = parsed.text
+            page_count = parsed.page_count
+        else:
+            raw_text = raw_doc.raw_text
+            page_count = None
+
+        if not raw_text or not raw_text.strip():
+            logger.warning("Empty text for: %s", raw_doc.title)
             return 0
 
         # Insert document row and get its id
@@ -172,10 +189,10 @@ class CopomPipeline:
             doc_type=raw_doc.doc_type,
             meeting_date=raw_doc.meeting_date,
             source_hash=src_hash,
-            page_count=parsed.page_count,
+            page_count=page_count,
         )
 
-        cleaned = clean_text(parsed.text)
+        cleaned = clean_text(raw_text)
         text_chunks = self._chunker.chunk_text(cleaned)
 
         if not text_chunks:

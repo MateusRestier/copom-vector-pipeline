@@ -1,26 +1,29 @@
-"""BCB (Banco Central do Brasil) document downloader.
+"""BCB (Banco Central do Brasil) COPOM document downloader.
 
-Downloads COPOM meeting minutes (atas) and policy communications (comunicados)
-from the BCB public website and returns them as RawDocument dataclasses.
+Uses the official BCB Open Data API documented at:
+  https://dadosabertos.bcb.gov.br/dataset/atas-comunicados-copom
+  https://www.bcb.gov.br/conteudo/dadosabertos/BCBDeinf/elements_copom.html
 
-The downloader checks the database before fetching to skip PDFs that have
-already been ingested (dedup via source_hash).
+API endpoints used:
+  Atas list    : GET /api/servico/sitebcb/copom/atas?quantidade=N
+  Ata detail   : GET /api/servico/sitebcb/copom/atas_detalhes?nro_reuniao=N
+  Comunicados  : GET /api/servico/sitebcb/copom/comunicados?quantidade=N
+  Comunicado   : GET /api/servico/sitebcb/copom/comunicados_detalhes?nro_reuniao=N
 
-BCB COPOM document pages (as of 2024):
-  Atas:        https://www.bcb.gov.br/publicacoes/atascopom
-  Comunicados: https://www.bcb.gov.br/publicacoes/comunicados  (filtered by COPOM)
-
-Required env vars:
-    BCB_REQUEST_DELAY_SECONDS  — polite delay between requests (default 1.0)
-    BCB_MAX_RETRIES            — max retry attempts per request (default 3)
+Document sources:
+  - Atas with PDF  (meeting >= ~200): raw_bytes contains PDF content
+  - Atas without PDF (meeting < 200): raw_text contains HTML of the minutes
+  - Comunicados: raw_text contains HTML (no PDF available)
 """
 
 from __future__ import annotations
 
+import html
 import logging
 import os
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Iterator
 
@@ -28,46 +31,43 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────
-#  Public BCB API endpoints
-# ─────────────────────────────────────────────
-_BCB_API_BASE = "https://www.bcb.gov.br"
+_BCB_BASE = "https://www.bcb.gov.br"
+_ATAS_LIST      = _BCB_BASE + "/api/servico/sitebcb/copom/atas?quantidade={qty}"
+_ATA_DETAIL     = _BCB_BASE + "/api/servico/sitebcb/copom/atas_detalhes?nro_reuniao={n}"
+_COMUNICADOS_LIST  = _BCB_BASE + "/api/servico/sitebcb/copom/comunicados?quantidade={qty}"
+_COMUNICADO_DETAIL = _BCB_BASE + "/api/servico/sitebcb/copom/comunicados_detalhes?nro_reuniao={n}"
 
-# OData API that lists COPOM meeting minutes with PDF links
-_ATAS_API = (
-    "https://www.bcb.gov.br/api/servico/sitebcb/atascopom/pesquisar"
-    "?$top={top}&$skip={skip}&$orderby=DataReferencia%20desc&$filter=IsDeleted%20eq%20false"
-)
-
-# OData API for COPOM communications
-_COMUNICADOS_API = (
-    "https://www.bcb.gov.br/api/servico/sitebcb/comunicados/pesquisar"
-    "?$top={top}&$skip={skip}&$orderby=DataReferencia%20desc"
-    "&$filter=IsDeleted%20eq%20false%20and%20contains(tolower(Titulo)%2C%20'copom')"
-)
-
-_PAGE_SIZE = 50
+_MAX_DOCS = 500   # max the API accepts per request
 
 
 @dataclass
 class RawDocument:
-    """A single COPOM document as downloaded from BCB."""
+    """A single COPOM document as downloaded from BCB.
+
+    Exactly one of raw_bytes or raw_text will be non-empty:
+      raw_bytes — PDF bytes (atas with PDF)
+      raw_text  — plain text extracted from HTML (atas without PDF, comunicados)
+    """
     url: str
     title: str
-    doc_type: str          # 'ata' or 'comunicado'
+    doc_type: str               # 'ata' or 'comunicado'
     meeting_date: date | None
-    raw_bytes: bytes
+    meeting_number: int
+    raw_bytes: bytes = field(default=b"")
+    raw_text: str = field(default="")
+
+    @property
+    def has_pdf(self) -> bool:
+        return len(self.raw_bytes) > 0
 
 
 class BcbDownloader:
-    """Downloads COPOM documents from the BCB public website.
+    """Downloads COPOM atas and comunicados from the BCB Open Data API.
 
     Args:
-        known_hashes: Set of source_hash values already in the database.
-            Documents whose hash matches an entry are skipped without
-            downloading the PDF bytes.
+        known_hashes:  Set of source_hash values already in the database.
         request_delay: Seconds to wait between HTTP requests.
-        max_retries: Number of retry attempts for failed requests.
+        max_retries:   Max retry attempts per request.
     """
 
     def __init__(
@@ -77,10 +77,14 @@ class BcbDownloader:
         max_retries: int | None = None,
     ) -> None:
         self._known_hashes = known_hashes or set()
-        self._delay = float(os.environ.get("BCB_REQUEST_DELAY_SECONDS", "1.0")
-                            if request_delay is None else request_delay)
-        self._max_retries = int(os.environ.get("BCB_MAX_RETRIES", "3")
-                                if max_retries is None else max_retries)
+        self._delay = float(
+            os.environ.get("BCB_REQUEST_DELAY_SECONDS", "1.0")
+            if request_delay is None else request_delay
+        )
+        self._max_retries = int(
+            os.environ.get("BCB_MAX_RETRIES", "3")
+            if max_retries is None else max_retries
+        )
         self._client = httpx.Client(
             timeout=30.0,
             follow_redirects=True,
@@ -98,20 +102,11 @@ class BcbDownloader:
         date_to: date | None = None,
         dry_run: bool = False,
     ) -> Iterator[RawDocument]:
-        """Yield RawDocument objects for each COPOM document found.
-
-        Args:
-            doc_types:  Which document types to fetch ('ata', 'comunicado').
-            date_from:  Only include documents on or after this date.
-            date_to:    Only include documents on or before this date.
-            dry_run:    If True, yield metadata only (raw_bytes will be empty).
-        """
+        """Yield RawDocument objects for each COPOM document."""
         if "ata" in doc_types:
-            yield from self._iter_doc_type("ata", _ATAS_API, date_from, date_to, dry_run)
+            yield from self._iter_atas(date_from, date_to, dry_run)
         if "comunicado" in doc_types:
-            yield from self._iter_doc_type(
-                "comunicado", _COMUNICADOS_API, date_from, date_to, dry_run
-            )
+            yield from self._iter_comunicados(date_from, date_to, dry_run)
 
     def close(self) -> None:
         self._client.close()
@@ -123,92 +118,138 @@ class BcbDownloader:
         self.close()
 
     # ──────────────────────────────────────────────────────────────────
-    #  Internal helpers
+    #  Atas
     # ──────────────────────────────────────────────────────────────────
 
-    def _iter_doc_type(
+    def _iter_atas(
         self,
-        doc_type: str,
-        api_template: str,
         date_from: date | None,
         date_to: date | None,
         dry_run: bool,
     ) -> Iterator[RawDocument]:
-        skip = 0
-        while True:
-            url = api_template.format(top=_PAGE_SIZE, skip=skip)
-            data = self._get_json(url)
-            items = data.get("value", [])
-            if not items:
-                break
+        data = self._get_json(_ATAS_LIST.format(qty=_MAX_DOCS))
+        items = data.get("conteudo", [])
+        logger.info("Found %d atas.", len(items))
 
-            for item in items:
-                doc = self._parse_item(item, doc_type)
-                if doc is None:
-                    continue
-                if not self._in_date_range(doc.meeting_date, date_from, date_to):
-                    continue
-                if dry_run:
-                    logger.info("[dry-run] Would fetch: %s", doc.title)
-                    yield doc
-                    continue
-                raw = self._fetch_pdf(doc.url)
-                if raw is None:
-                    continue
+        for item in items:
+            meeting_date = _parse_date(item.get("dataReferencia"))
+            if not _in_date_range(meeting_date, date_from, date_to):
+                continue
+
+            meeting_number = item.get("nroReuniao") or item.get("nro_reuniao", 0)
+            title = item.get("titulo", f"Ata {meeting_number}").strip()
+
+            if dry_run:
+                logger.info("[dry-run] ata #%d — %s (%s)", meeting_number, title, meeting_date)
                 yield RawDocument(
-                    url=doc.url,
-                    title=doc.title,
-                    doc_type=doc.doc_type,
-                    meeting_date=doc.meeting_date,
-                    raw_bytes=raw,
+                    url="", title=title, doc_type="ata",
+                    meeting_date=meeting_date, meeting_number=meeting_number,
                 )
+                continue
+
+            doc = self._fetch_ata_detail(meeting_number, title, meeting_date)
+            if doc:
+                yield doc
                 time.sleep(self._delay)
 
-            skip += _PAGE_SIZE
-            if len(items) < _PAGE_SIZE:
-                break
-
-    def _parse_item(self, item: dict, doc_type: str) -> RawDocument | None:
-        """Parse a single API result item into a RawDocument stub (no bytes)."""
+    def _fetch_ata_detail(
+        self, meeting_number: int, title: str, meeting_date: date | None
+    ) -> RawDocument | None:
+        url = _ATA_DETAIL.format(n=meeting_number)
         try:
-            title = item.get("Titulo") or item.get("titulo") or ""
-            pdf_link = self._extract_pdf_link(item)
-            if not pdf_link:
-                logger.debug("No PDF link found for item: %s", title)
-                return None
-
-            url = pdf_link if pdf_link.startswith("http") else f"{_BCB_API_BASE}{pdf_link}"
-            raw_date = item.get("DataReferencia") or item.get("dataReferencia")
-            meeting_date = self._parse_date(raw_date)
-
-            return RawDocument(
-                url=url,
-                title=title.strip(),
-                doc_type=doc_type,
-                meeting_date=meeting_date,
-                raw_bytes=b"",
-            )
-        except Exception as exc:
-            logger.warning("Failed to parse item: %s — %s", item, exc)
+            detail = self._get_json(url)
+        except RuntimeError as exc:
+            logger.error("Could not fetch ata detail #%d: %s", meeting_number, exc)
             return None
 
-    def _extract_pdf_link(self, item: dict) -> str | None:
-        """Extract the PDF URL from an API item (field names vary by endpoint)."""
-        for key in ("Url", "url", "LinkPdf", "linkPdf", "link"):
-            val = item.get(key)
-            if val and isinstance(val, str) and val.lower().endswith(".pdf"):
-                return val
-        # Some items embed the link inside a nested 'DescricaoHtml' field
-        desc = item.get("DescricaoHtml") or ""
-        if ".pdf" in desc.lower():
-            import re
-            match = re.search(r'href="([^"]+\.pdf)"', desc, re.IGNORECASE)
-            if match:
-                return match.group(1)
+        pdf_url = detail.get("urlPdfAta", "").strip()
+
+        # --- Ata with PDF ---
+        if pdf_url:
+            full_url = pdf_url if pdf_url.startswith("http") else _BCB_BASE + pdf_url
+            raw = self._fetch_pdf(full_url)
+            if raw:
+                return RawDocument(
+                    url=full_url, title=title, doc_type="ata",
+                    meeting_date=meeting_date, meeting_number=meeting_number,
+                    raw_bytes=raw,
+                )
+
+        # --- Ata without PDF: use textoAta HTML ---
+        html_text = detail.get("textoAta", "").strip()
+        if html_text:
+            plain = _html_to_text(html_text)
+            return RawDocument(
+                url=_ATA_DETAIL.format(n=meeting_number),
+                title=title, doc_type="ata",
+                meeting_date=meeting_date, meeting_number=meeting_number,
+                raw_text=plain,
+            )
+
+        logger.warning("Ata #%d has neither PDF nor text.", meeting_number)
         return None
 
+    # ──────────────────────────────────────────────────────────────────
+    #  Comunicados
+    # ──────────────────────────────────────────────────────────────────
+
+    def _iter_comunicados(
+        self,
+        date_from: date | None,
+        date_to: date | None,
+        dry_run: bool,
+    ) -> Iterator[RawDocument]:
+        data = self._get_json(_COMUNICADOS_LIST.format(qty=_MAX_DOCS))
+        items = data.get("conteudo", [])
+        logger.info("Found %d comunicados.", len(items))
+
+        for item in items:
+            meeting_date = _parse_date(item.get("dataReferencia"))
+            if not _in_date_range(meeting_date, date_from, date_to):
+                continue
+
+            meeting_number = item.get("nro_reuniao") or item.get("nroReuniao", 0)
+            title = item.get("titulo", f"Comunicado {meeting_number}").strip()
+
+            if dry_run:
+                logger.info("[dry-run] comunicado #%d — %s (%s)", meeting_number, title, meeting_date)
+                yield RawDocument(
+                    url="", title=title, doc_type="comunicado",
+                    meeting_date=meeting_date, meeting_number=meeting_number,
+                )
+                continue
+
+            doc = self._fetch_comunicado_detail(meeting_number, title, meeting_date)
+            if doc:
+                yield doc
+                time.sleep(self._delay)
+
+    def _fetch_comunicado_detail(
+        self, meeting_number: int, title: str, meeting_date: date | None
+    ) -> RawDocument | None:
+        url = _COMUNICADO_DETAIL.format(n=meeting_number)
+        try:
+            detail = self._get_json(url)
+        except RuntimeError as exc:
+            logger.error("Could not fetch comunicado detail #%d: %s", meeting_number, exc)
+            return None
+
+        html_text = detail.get("textoComunicado", "").strip()
+        if not html_text:
+            logger.warning("Comunicado #%d has no text.", meeting_number)
+            return None
+
+        return RawDocument(
+            url=url, title=title, doc_type="comunicado",
+            meeting_date=meeting_date, meeting_number=meeting_number,
+            raw_text=_html_to_text(html_text),
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    #  HTTP helpers
+    # ──────────────────────────────────────────────────────────────────
+
     def _fetch_pdf(self, url: str) -> bytes | None:
-        """Download a PDF with retry logic. Returns None on permanent failure."""
         for attempt in range(1, self._max_retries + 1):
             try:
                 resp = self._client.get(url)
@@ -227,7 +268,6 @@ class BcbDownloader:
         return None
 
     def _get_json(self, url: str) -> dict:
-        """Fetch a JSON endpoint with retry logic."""
         for attempt in range(1, self._max_retries + 1):
             try:
                 resp = self._client.get(url)
@@ -239,27 +279,43 @@ class BcbDownloader:
                     time.sleep(self._delay * attempt)
         raise RuntimeError(f"Failed to fetch JSON from {url} after {self._max_retries} attempts")
 
-    @staticmethod
-    def _parse_date(raw: str | None) -> date | None:
-        if not raw:
-            return None
-        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%d/%m/%Y"):
-            try:
-                return datetime.strptime(raw[:len(fmt)], fmt).date()
-            except ValueError:
-                continue
-        return None
 
-    @staticmethod
-    def _in_date_range(
-        doc_date: date | None,
-        date_from: date | None,
-        date_to: date | None,
-    ) -> bool:
-        if doc_date is None:
-            return True  # include documents without a date
-        if date_from and doc_date < date_from:
-            return False
-        if date_to and doc_date > date_to:
-            return False
+# ──────────────────────────────────────────────────────────────────
+#  Helpers
+# ──────────────────────────────────────────────────────────────────
+
+def _parse_date(raw: str | None) -> date | None:
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(raw[:len(fmt)], fmt).date()
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _in_date_range(doc_date: date | None, date_from: date | None, date_to: date | None) -> bool:
+    if doc_date is None:
         return True
+    if date_from and doc_date < date_from:
+        return False
+    if date_to and doc_date > date_to:
+        return False
+    return True
+
+
+def _html_to_text(html_content: str) -> str:
+    """Strip HTML tags and decode entities, returning plain text."""
+    # Remove script/style blocks
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html_content, flags=re.DOTALL | re.IGNORECASE)
+    # Replace block-level tags with newlines
+    text = re.sub(r"<(br|p|div|h[1-6]|li|tr)[^>]*>", "\n", text, flags=re.IGNORECASE)
+    # Remove remaining tags
+    text = re.sub(r"<[^>]+>", "", text)
+    # Decode HTML entities (&amp; &nbsp; etc.)
+    text = html.unescape(text)
+    # Normalize whitespace
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
