@@ -1,9 +1,9 @@
 """Google Gemini embedding provider.
 
-Model: text-embedding-004 (768 dimensions, multilingual, supports Portuguese).
+Uses the current google-genai SDK (google.genai), which replaced the
+deprecated google-generativeai package.
 
-To switch to a different Gemini embedding model, set GEMINI_EMBEDDING_MODEL
-in your .env file.  Update EMBEDDING_DIMENSIONS accordingly.
+Model: text-embedding-004 (768 dimensions, multilingual, supports Portuguese).
 
 Required env vars:
     GEMINI_API_KEY          — your Google AI API key
@@ -20,15 +20,13 @@ from copom_pipeline.providers.factory import register_embedding_provider
 
 @register_embedding_provider("gemini")
 class GeminiEmbeddingProvider(EmbeddingProvider):
-    """Embedding provider backed by the Google Gemini API."""
+    """Embedding provider backed by the Google Gemini API (google-genai SDK)."""
 
     _DEFAULT_MODEL = "models/text-embedding-004"
     _DIMENSIONS = 768
 
     def __init__(self) -> None:
-        # Lazy import: google-generativeai is only loaded when this provider
-        # is instantiated, not at module import time.
-        import google.generativeai as genai  # type: ignore
+        from google import genai  # type: ignore
 
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
@@ -36,43 +34,26 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
                 "GEMINI_API_KEY environment variable is not set. "
                 "Set it in your .env file before running the pipeline."
             )
-        genai.configure(api_key=api_key)
-        self._genai = genai
+        self._client = genai.Client(api_key=api_key)
         self._model = os.environ.get("GEMINI_EMBEDDING_MODEL", self._DEFAULT_MODEL)
 
-    # ──────────────────────────────────────────────────────────────────
-    #  EmbeddingProvider interface
-    # ──────────────────────────────────────────────────────────────────
-
     def embed_text(self, text: str) -> list[float]:
-        """Embed a single string and return its vector."""
-        result = self._genai.embed_content(
+        result = self._client.models.embed_content(
             model=self._model,
-            content=text,
-            task_type="retrieval_document",
+            contents=text,
         )
-        return result["embedding"]
+        return list(result.embeddings[0].values)
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Embed a list of strings using Gemini's batch endpoint.
-
-        Falls back to sequential calls if the batch API is unavailable.
-        """
         if not texts:
             return []
         try:
-            result = self._genai.embed_content(
+            result = self._client.models.embed_content(
                 model=self._model,
-                content=texts,
-                task_type="retrieval_document",
+                contents=texts,
             )
-            embeddings = result["embedding"]
-            # Gemini returns a flat list for a single item, list-of-lists for batch.
-            if texts and isinstance(embeddings[0], float):
-                return [embeddings]
-            return embeddings
+            return [list(e.values) for e in result.embeddings]
         except Exception:
-            # Fallback: embed one-by-one
             return [self.embed_text(t) for t in texts]
 
     @property
