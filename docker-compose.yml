@@ -10,8 +10,8 @@ services:
       POSTGRES_DB: copom_rag
     volumes:
       - pgvector_data:/var/lib/postgresql/data
-      # Schema is applied automatically on first container start.
-      - ./scripts/create_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+      # NOTE: file bind-mounts from paths with spaces fail on Docker Desktop for Windows.
+      # Apply the schema manually after first start — see README Quick Start.
     restart: unless-stopped
 
 volumes:
