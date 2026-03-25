@@ -35,8 +35,9 @@ CREATE TABLE IF NOT EXISTS chunks (
     -- cleaned_text  : cleaned text that was actually fed to the embedding model
     chunk_text     TEXT    NOT NULL,
     cleaned_text   TEXT    NOT NULL,
-    -- Dimensionality must match EMBEDDING_DIMENSIONS env var (default 768 for Gemini text-embedding-004).
-    embedding      vector(768),
+    -- Dimensionality must match EMBEDDING_DIMENSIONS env var (default 1536).
+    -- gemini-embedding-001 outputs 3072 dims natively, truncated to 1536 to fit HNSW's 2000-dim limit.
+    embedding      vector(1536),
     chunk_strategy TEXT    NOT NULL DEFAULT 'recursive',
     chunk_size     INTEGER NOT NULL,
     chunk_overlap  INTEGER NOT NULL,

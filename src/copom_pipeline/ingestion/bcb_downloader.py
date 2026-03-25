@@ -157,10 +157,14 @@ class BcbDownloader:
     ) -> RawDocument | None:
         url = _ATA_DETAIL.format(n=meeting_number)
         try:
-            detail = self._get_json(url)
+            resp = self._get_json(url)
         except RuntimeError as exc:
             logger.error("Could not fetch ata detail #%d: %s", meeting_number, exc)
             return None
+
+        # Detail endpoint wraps its payload in a conteudo array, just like the list endpoint.
+        conteudo = resp.get("conteudo", [])
+        detail = conteudo[0] if conteudo else {}
 
         pdf_url = detail.get("urlPdfAta", "").strip()
 
@@ -229,10 +233,13 @@ class BcbDownloader:
     ) -> RawDocument | None:
         url = _COMUNICADO_DETAIL.format(n=meeting_number)
         try:
-            detail = self._get_json(url)
+            resp = self._get_json(url)
         except RuntimeError as exc:
             logger.error("Could not fetch comunicado detail #%d: %s", meeting_number, exc)
             return None
+
+        conteudo = resp.get("conteudo", [])
+        detail = conteudo[0] if conteudo else {}
 
         html_text = detail.get("textoComunicado", "").strip()
         if not html_text:
@@ -287,9 +294,10 @@ class BcbDownloader:
 def _parse_date(raw: str | None) -> date | None:
     if not raw:
         return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%d/%m/%Y"):
+    # Map each format to the expected string length after expansion (%Y=4, %m/%d=2).
+    for fmt, length in [("%Y-%m-%dT%H:%M:%S", 19), ("%Y-%m-%d", 10), ("%d/%m/%Y", 10)]:
         try:
-            return datetime.strptime(raw[:len(fmt)], fmt).date()
+            return datetime.strptime(raw[:length], fmt).date()
         except (ValueError, TypeError):
             continue
     return None
