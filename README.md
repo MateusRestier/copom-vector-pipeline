@@ -1,52 +1,52 @@
 # copom-vector-pipeline
 
-Pipeline de ingestão de dados para documentos do COPOM (Comitê de Política Monetária do Banco Central do Brasil).
+Data ingestion pipeline for COPOM (Comitê de Política Monetária do Banco Central do Brasil) documents.
 
-Baixa automaticamente Atas e Comunicados do BCB, extrai texto dos PDFs, chunka, gera embeddings e armazena tudo em PostgreSQL + pgvector. É a base do ecossistema [COPOM RAG](#ecossistema).
+Automatically downloads Minutes and Communications from the BCB, extracts text from PDFs, chunks the content, generates embeddings, and stores everything in PostgreSQL + pgvector. It is the data foundation of the [COPOM RAG](#ecosystem) ecosystem.
 
 ---
 
-## Ecossistema
+## Ecosystem
 
-Este projeto é um dos três componentes do sistema COPOM RAG:
+This project is one of three components of the COPOM RAG system:
 
 ```
 Banco Central (PDFs)
         │
         ▼
-copom-vector-pipeline   ← você está aqui (ingestão, chunking, embeddings)
+copom-vector-pipeline   ← you are here (ingestion, chunking, embeddings)
         │
         ▼
-PostgreSQL + pgvector   ← banco compartilhado (Neon)
+PostgreSQL + pgvector   ← shared vector database (Neon)
         │
         ▼
-copom-rag-api           ← busca semântica + geração via Gemini
+copom-rag-api           ← semantic search + generation via Gemini
         │
         ▼
-copom-streamlit         ← interface web para o usuário final
+copom-streamlit         ← web interface for end users
 ```
 
 ---
 
-## Arquitetura
+## Architecture
 
 ```
 BCB API ──► BcbDownloader ──► PdfParser ──► TextCleaner ──► TextChunker
                                                                   │
                                                          EmbeddingProvider
-                                                         (Gemini / pluggável)
+                                                         (Gemini / pluggable)
                                                                   │
                                                          PostgresHandler ──► PostgreSQL + pgvector
 ```
 
-Todos os colaboradores são injetados em `CopomPipeline` via dependency injection. Trocar qualquer componente (provider de embedding, estratégia de chunking, fonte de documentos) não requer alterações na lógica do pipeline.
+All collaborators are wired together by `CopomPipeline` using dependency injection. Swapping any component (embedding provider, chunking strategy, document source) does not require touching the pipeline logic.
 
 ---
 
-## Requisitos
+## Requirements
 
 - Python 3.11+
-- Docker (para PostgreSQL + pgvector local)
+- Docker (for local PostgreSQL + pgvector)
 - Google Gemini API key
 
 ---
@@ -54,24 +54,24 @@ Todos os colaboradores são injetados em `CopomPipeline` via dependency injectio
 ## Quick Start
 
 ```bash
-# 1. Clone e entre no diretório
+# 1. Clone the repository
 git clone https://github.com/<org>/copom-vector-pipeline.git
 cd copom-vector-pipeline
 
-# 2. Inicie o PostgreSQL + pgvector
+# 2. Start PostgreSQL + pgvector
 docker compose up -d
 
-# 3. Instale o pacote
+# 3. Install the package
 pip install -e .
 
-# 4. Configure as variáveis de ambiente
+# 4. Configure environment variables
 cp .env.example .env
-# Edite .env e preencha GEMINI_API_KEY e DATABASE_URL
+# Edit .env and fill in GEMINI_API_KEY and DATABASE_URL
 
-# 5. Aplique o schema (primeira vez)
+# 5. Apply the database schema (first time only)
 docker exec -i copom_pgvector psql -U copom -d copom_rag < scripts/create_schema.sql
 
-# 6. Execute o pipeline
+# 6. Run the pipeline
 copom-pipeline --doc-type all
 ```
 
@@ -83,104 +83,104 @@ copom-pipeline --doc-type all
 copom-pipeline [OPTIONS]
 
 Options:
-  --doc-type {ata,comunicado,all}        Tipos de documento a ingerir (padrão: all)
-  --from-date YYYY-MM-DD                 Processar documentos a partir desta data
-  --to-date   YYYY-MM-DD                 Processar documentos até esta data
-  --resume                               Retomar a partir do último checkpoint
-  --dry-run                              Baixa metadados apenas — sem escrita no BD
-  --chunk-size INT                       Tamanho dos chunks em tokens (padrão: 500)
-  --chunk-overlap INT                    Sobreposição entre chunks em tokens (padrão: 20)
-  --batch-size INT                       Batch size para embedding (padrão: 50)
-  --checkpoint-interval INT              Salvar checkpoint a cada N documentos (padrão: 20)
-  --checkpoint-dir PATH                  Diretório para checkpoints (padrão: ./checkpoints)
-  --log-dir PATH                         Diretório para logs (padrão: ./logs)
+  --doc-type {ata,comunicado,all}        Document types to ingest (default: all)
+  --from-date YYYY-MM-DD                 Only process documents from this date
+  --to-date   YYYY-MM-DD                 Only process documents up to this date
+  --resume                               Resume from the last saved checkpoint
+  --dry-run                              Fetch metadata only — no DB writes
+  --chunk-size INT                       Token chunk size (default: 500)
+  --chunk-overlap INT                    Token overlap between chunks (default: 20)
+  --batch-size INT                       Embedding batch size (default: 50)
+  --checkpoint-interval INT              Save checkpoint every N documents (default: 20)
+  --checkpoint-dir PATH                  Directory for checkpoint files (default: ./checkpoints)
+  --log-dir PATH                         Directory for log files (default: ./logs)
   --log-level {DEBUG,INFO,WARNING,ERROR}
 ```
 
-**Exemplos:**
+**Examples:**
 
 ```bash
-# Ingerir todos os documentos
+# Ingest all document types
 copom-pipeline --doc-type all
 
-# Apenas atas de 2024
+# Only minutes from 2024
 copom-pipeline --doc-type ata --from-date 2024-01-01 --to-date 2024-12-31
 
-# Retomar ingestão interrompida
+# Resume an interrupted run
 copom-pipeline --doc-type all --resume
 
-# Dry-run (sem escrita no banco)
+# Dry-run (no database writes)
 copom-pipeline --doc-type all --dry-run
 ```
 
 ---
 
-## Variáveis de Ambiente
+## Environment Variables
 
-| Variável | Obrigatória | Padrão | Descrição |
-|----------|:-----------:|--------|-----------|
-| `GEMINI_API_KEY` | **Sim** | — | Google AI API key |
-| `DATABASE_URL` | **Sim** | — | PostgreSQL DSN (`postgresql://user:pass@host/db`) |
-| `EMBEDDING_PROVIDER` | Não | `gemini` | Provider de embedding |
-| `GEMINI_EMBEDDING_MODEL` | Não | `models/gemini-embedding-001` | Modelo de embedding |
-| `EMBEDDING_DIMENSIONS` | Não | `1536` | Dimensões do vetor de saída |
-| `CHUNK_SIZE` | Não | `500` | Tamanho dos chunks em tokens |
-| `CHUNK_OVERLAP` | Não | `20` | Sobreposição entre chunks em tokens |
-| `BATCH_SIZE` | Não | `50` | Batch size para embedding |
-| `BCB_REQUEST_DELAY_SECONDS` | Não | `1.0` | Delay entre requisições ao BCB |
-| `BCB_MAX_RETRIES` | Não | `3` | Tentativas máximas por requisição |
+| Variable | Required | Default | Description |
+|----------|:--------:|---------|-------------|
+| `GEMINI_API_KEY` | **Yes** | — | Google AI API key |
+| `DATABASE_URL` | **Yes** | — | PostgreSQL DSN (`postgresql://user:pass@host/db`) |
+| `EMBEDDING_PROVIDER` | No | `gemini` | Embedding provider name |
+| `GEMINI_EMBEDDING_MODEL` | No | `models/gemini-embedding-001` | Gemini embedding model |
+| `EMBEDDING_DIMENSIONS` | No | `1536` | Output vector dimensions |
+| `CHUNK_SIZE` | No | `500` | Chunk size in tokens |
+| `CHUNK_OVERLAP` | No | `20` | Overlap between chunks in tokens |
+| `BATCH_SIZE` | No | `50` | Embedding batch size |
+| `BCB_REQUEST_DELAY_SECONDS` | No | `1.0` | Delay between HTTP requests to BCB |
+| `BCB_MAX_RETRIES` | No | `3` | Max retries per HTTP request |
 
-> **Importante:** `GEMINI_EMBEDDING_MODEL` e `EMBEDDING_DIMENSIONS` devem ser idênticos aos configurados na `copom-rag-api`. Se mudar o modelo de embedding, é necessário re-ingerir todos os documentos.
-
----
-
-## Schema do Banco de Dados
-
-Veja [`scripts/create_schema.sql`](scripts/create_schema.sql).
-
-Duas tabelas:
-- **`documents`** — um registro por documento (url, title, doc_type, meeting_date, source_hash)
-- **`chunks`** — um registro por chunk de texto, com `embedding vector(1536)` e índice HNSW
-
-A deduplicação é automática via `source_hash` (SHA-256 do conteúdo): re-executar o pipeline não duplica documentos já ingeridos.
+> **Important:** `GEMINI_EMBEDDING_MODEL` and `EMBEDDING_DIMENSIONS` must be identical to those configured in `copom-rag-api`. Changing the embedding model requires re-ingesting all documents.
 
 ---
 
-## Utilitários de Banco
+## Database Schema
+
+See [`scripts/create_schema.sql`](scripts/create_schema.sql).
+
+Two tables:
+- **`documents`** — one row per document (url, title, doc_type, meeting_date, source_hash)
+- **`chunks`** — one row per text chunk, with `embedding vector(1536)` and an HNSW index
+
+Deduplication is automatic via `source_hash` (SHA-256 of the content): re-running the pipeline will not duplicate already-ingested documents.
+
+---
+
+## Database Utilities
 
 ```bash
-# Estatísticas gerais
+# General stats
 python scripts/db_crud.py stats
 
-# Listar documentos ingeridos
+# List ingested documents
 python scripts/db_crud.py list
 
-# Detalhes de um documento
+# Show details of a document
 python scripts/db_crud.py show 1
 
-# Busca semântica manual
+# Manual semantic search
 python scripts/db_crud.py search "taxa Selic 2026"
 python scripts/db_crud.py search "inflação" --top-k 10 --doc-type ata
 
-# Deletar um documento
+# Delete a document
 python scripts/db_crud.py delete 3
 ```
 
 ---
 
-## Adicionar um Novo Provider de Embedding
+## Adding a New Embedding Provider
 
-1. Crie `src/copom_pipeline/providers/meu_provider.py`
-2. Herde de `EmbeddingProvider` e implemente `embed_text`, `embed_batch` e `dimensions`
-3. Decore com `@register_embedding_provider("meu-provider")`
-4. Adicione um import em `providers/factory.py` dentro de `_load_providers()`
-5. Defina `EMBEDDING_PROVIDER=meu-provider` no `.env`
+1. Create `src/copom_pipeline/providers/my_provider.py`
+2. Subclass `EmbeddingProvider` and implement `embed_text`, `embed_batch`, and `dimensions`
+3. Decorate the class with `@register_embedding_provider("my-provider")`
+4. Add an import in `providers/factory.py` inside `_load_providers()`
+5. Set `EMBEDDING_PROVIDER=my-provider` in `.env`
 
-Nenhum outro arquivo precisa ser alterado.
+No other files need to change.
 
 ---
 
-## Desenvolvimento
+## Development
 
 ```bash
 pip install -e ".[dev]"
@@ -189,7 +189,7 @@ pytest tests/
 
 ---
 
-## Projetos relacionados
+## Related projects
 
-- [copom-rag-api](https://github.com/mateusfg7/copom-rag-api) — API RAG que consome o banco vetorial
-- [copom-streamlit](https://github.com/mateusfg7/copom-streamlit) — interface web para consultas em linguagem natural
+- [copom-rag-api](https://github.com/mateusfg7/copom-rag-api) — RAG API that consumes the vector database
+- [copom-streamlit](https://github.com/mateusfg7/copom-streamlit) — web interface for natural language queries
