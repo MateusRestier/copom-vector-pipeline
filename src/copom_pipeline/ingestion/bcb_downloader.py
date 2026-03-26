@@ -166,7 +166,7 @@ class BcbDownloader:
         conteudo = resp.get("conteudo", [])
         detail = conteudo[0] if conteudo else {}
 
-        pdf_url = detail.get("urlPdfAta", "").strip()
+        pdf_url = (detail.get("urlPdfAta") or "").strip()
 
         # --- Ata with PDF ---
         if pdf_url:
@@ -180,7 +180,7 @@ class BcbDownloader:
                 )
 
         # --- Ata without PDF: use textoAta HTML ---
-        html_text = detail.get("textoAta", "").strip()
+        html_text = (detail.get("textoAta") or "").strip()
         if html_text:
             plain = _html_to_text(html_text)
             return RawDocument(
@@ -241,7 +241,7 @@ class BcbDownloader:
         conteudo = resp.get("conteudo", [])
         detail = conteudo[0] if conteudo else {}
 
-        html_text = detail.get("textoComunicado", "").strip()
+        html_text = (detail.get("textoComunicado") or "").strip()
         if not html_text:
             logger.warning("Comunicado #%d has no text.", meeting_number)
             return None

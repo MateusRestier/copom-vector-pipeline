@@ -15,10 +15,43 @@ Required env vars:
 
 from __future__ import annotations
 
+import logging
 import os
+import re
+import time
 
 from copom_pipeline.providers.base import EmbeddingProvider
 from copom_pipeline.providers.factory import register_embedding_provider
+
+logger = logging.getLogger(__name__)
+
+_MAX_RETRIES = 5
+
+
+def _retry_delay_from_error(exc: Exception) -> float:
+    """Parse retryDelay seconds from a 429 error message, defaulting to 60s."""
+    match = re.search(r"retryDelay.*?(\d+)s", str(exc))
+    if match:
+        return float(match.group(1)) + 2.0
+    return 60.0
+
+
+def _with_rate_limit_retry(fn, *args, **kwargs):
+    """Call fn(*args, **kwargs), sleeping and retrying on 429 errors."""
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+                delay = _retry_delay_from_error(exc)
+                logger.warning(
+                    "Rate limit hit (attempt %d/%d) — sleeping %.0fs before retry.",
+                    attempt, _MAX_RETRIES, delay,
+                )
+                time.sleep(delay)
+            else:
+                raise
+    raise RuntimeError(f"Embedding failed after {_MAX_RETRIES} retries due to rate limiting.")
 
 
 @register_embedding_provider("gemini")
@@ -44,7 +77,8 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         self._embed_config = genai_types.EmbedContentConfig(output_dimensionality=self._dimensions)
 
     def embed_text(self, text: str) -> list[float]:
-        result = self._client.models.embed_content(
+        result = _with_rate_limit_retry(
+            self._client.models.embed_content,
             model=self._model,
             contents=text,
             config=self._embed_config,
@@ -55,7 +89,8 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         if not texts:
             return []
         try:
-            result = self._client.models.embed_content(
+            result = _with_rate_limit_retry(
+                self._client.models.embed_content,
                 model=self._model,
                 contents=texts,
                 config=self._embed_config,
