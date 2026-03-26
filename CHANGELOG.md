@@ -9,6 +9,22 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-03-26
+
+### Fixed
+- `BcbDownloader`: fields `urlPdfAta`, `textoAta`, and `textoComunicado` can be present
+  in the BCB API response with a `null` value (not just missing). Changed `.get(key, "")`
+  to `(obj.get(key) or "")` to guard against `AttributeError: 'NoneType'.strip()` on
+  older ata records.
+- `GeminiEmbeddingProvider`: rate-limit errors (HTTP 429 / `RESOURCE_EXHAUSTED`) now
+  trigger an indefinite retry with the delay returned by the API (`retryDelay` field),
+  instead of skipping the document after 5 attempts. This prevents silent data loss
+  during large historical ingestion runs.
+
+### Added
+- `DEPLOYMENT.md`: full operational guide covering Neon setup, running ingestions,
+  getting/rotating the database password, and troubleshooting.
+
 ## [0.1.0] — 2026-03-25
 
 ### Added
