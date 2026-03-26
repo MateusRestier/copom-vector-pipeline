@@ -25,9 +25,6 @@ from copom_pipeline.providers.factory import register_embedding_provider
 
 logger = logging.getLogger(__name__)
 
-_MAX_RETRIES = 5
-
-
 def _retry_delay_from_error(exc: Exception) -> float:
     """Parse retryDelay seconds from a 429 error message, defaulting to 60s."""
     match = re.search(r"retryDelay.*?(\d+)s", str(exc))
@@ -37,21 +34,22 @@ def _retry_delay_from_error(exc: Exception) -> float:
 
 
 def _with_rate_limit_retry(fn, *args, **kwargs):
-    """Call fn(*args, **kwargs), sleeping and retrying on 429 errors."""
-    for attempt in range(1, _MAX_RETRIES + 1):
+    """Call fn(*args, **kwargs), sleeping and retrying indefinitely on 429 errors."""
+    attempt = 0
+    while True:
         try:
             return fn(*args, **kwargs)
         except Exception as exc:
             if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+                attempt += 1
                 delay = _retry_delay_from_error(exc)
                 logger.warning(
-                    "Rate limit hit (attempt %d/%d) — sleeping %.0fs before retry.",
-                    attempt, _MAX_RETRIES, delay,
+                    "Rate limit hit (attempt %d) — sleeping %.0fs before retry.",
+                    attempt, delay,
                 )
                 time.sleep(delay)
             else:
                 raise
-    raise RuntimeError(f"Embedding failed after {_MAX_RETRIES} retries due to rate limiting.")
 
 
 @register_embedding_provider("gemini")
